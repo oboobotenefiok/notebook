@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 use anyhow::{Context, Result};
 use chrono::Local;
 use clap::{Parser, Subcommand};
@@ -189,12 +190,65 @@ fn list_notes(conn: &Connection, tag: Option<String>, recent: Option<usize>) -> 
                 println!("      Tags: {}", note.tags);
             }
             println!("      Created: {}\n", note.created_at);
+=======
+mod io_handler;
+mod delete_note;
+mod create_note;
+mod print_menu; 
+mod read_notes;
+
+use rusqlite::{Connection, Result, Row};
+use std::error::Error;
+
+use crate::{
+    delete_note::delete_note,
+    create_note::create_note,
+    io_handler::io_handler,
+    print_menu::print_menu,
+    read_notes::read_notes
+};
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let conn = Connection::open("notebook.db")?;
+
+    // Create table if it doesn't exist
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )",
+        [],
+    )?;
+// Do we manually handle timestamp?
+    
+    println!("      NOTEBOOK APPLICATION STARTED.     ");
+    print_menu();
+    
+    loop {
+        
+        let choice = io_handler("--- Enter your choice Number");
+
+        match choice.trim() {
+            "0" => print_menu(),
+            "1" => create_note(&conn)?,
+            "2" => read_notes(&conn)?, // KEEP AN EYE
+       //     "3" => update_note(&conn)?,
+            "4" => delete_note(&conn)?,
+            "5" => {
+                println!("Exiting application. Goodbye.");
+                break;
+            }
+            _ => println!("Invalid! Please try again with a NUMBER from the menu."),
+>>>>>>> 259522b (Separation Of Concerns)
         }
     }
 
     Ok(())
 }
 
+<<<<<<< HEAD
 fn view_note(conn: &Connection, id: i32) -> Result<()> {
     let mut stmt = conn.prepare(
         "SELECT id, title, content, tags, created_at, updated_at FROM notes WHERE id = ?1",
@@ -359,3 +413,59 @@ fn edit_note(
 
     Ok(())
 }
+=======
+
+/*
+fn update_note(conn: &Connection) -> Result<()> {
+  //  read_notes(conn)?; // Show existing notes first
+
+    let id_str = io_handler("Enter the ID of the note to update");
+    let id: i32 = match id_str.trim().parse() {
+        Ok(n) => n,
+        Err(_) => {
+            println!("Invalid ID format.");
+            return Ok(());
+        }
+    };
+
+    let title = io_handler("Enter new title (leave empty to keep current)");
+    let content = io_handler("Enter new content (leave empty to keep current)");
+
+    let mut updates = vec![];
+    let mut params: Vec<&dyn rusqlite::ToSql> = vec![];
+
+    if !title.trim().is_empty() {
+        updates.push("title = ?1");
+        params.push(&title.trim());
+    }
+    if !content.trim().is_empty() {
+        updates.push("content = ?2");
+        params.push(&content.trim());
+    }
+
+    if updates.is_empty() {
+        println!("No changes provided.");
+        return Ok(());
+    }
+
+    let sql = format!(
+        "UPDATE notes SET {} WHERE id = ?{}",
+        updates.join(", "),
+        if updates.len() == 1 { "2" } else { "3" }
+    );
+
+    params.push(&id);
+
+    let affected = conn.execute(&sql, rusqlite::params_from_iter(params))?;
+    
+    if affected > 0 {
+        println!("Note updated successfully.");
+    } else {
+        println!("No note found with ID: {}", id);
+    }
+    Ok(())
+}
+*/
+
+
+>>>>>>> 259522b (Separation Of Concerns)

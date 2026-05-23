@@ -3,9 +3,14 @@ name = "notebook"
 version = "0.1.0"
 edition = "2024"
 
+<<<<<<< HEAD
 
 [dependencies]
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 clap = { version = "4.4", features = ["derive"] }
 chrono = "0.4"
 anyhow = "1.0"
+=======
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+>>>>>>> 259522b (Separation Of Concerns)
