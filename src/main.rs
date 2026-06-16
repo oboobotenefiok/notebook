@@ -1,229 +1,244 @@
+// ============================================================
+// We welcome you to our orange-flavored CLI notebook!
+// We store every note in a local SQLite database so our data
+// survives between sessions without any server nonsense.
+// ============================================================
+
 use anyhow::{Context, Result};
 use chrono::Local;
 use clap::{Parser, Subcommand};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 
-#[derive(Parser)]
-#[command(name = "notebook")]
-#[command(about = "A simple CLI notebook for taking notes", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
+// ── We define our orange palette with raw ANSI escape codes ──
+// This keeps us dependency-free while still looking gorgeous.
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Add a new note
-    Add {
-        #[arg(short, long)]
-        title: String,
+// const ORANGE: &str = "\x1b[38;5;214m"; // Our signature orange
+const ORANGE_BOLD: &str = "\x1b[1;38;5;214m"; // Bold orange for headers
+const AMBER: &str = "\x1b[38;5;208m"; // Slightly darker for accents
+const DIM: &str = "\x1b[38;5;180m"; // Muted warm tone for metadata
+const WHITE_BOLD: &str = "\x1b[1;97m"; // Bright white for note bodies
+const RED: &str = "\x1b[38;5;203m"; // We use red only for errors
+const GREEN: &str = "\x1b[38;5;118m"; // We use green for success
+const RESET: &str = "\x1b[0m"; // We always reset at the end
 
-        #[arg(short, long)]
-        content: String,
-
-        #[arg(short, long)]
-        tags: Option<String>,
-    },
-
-    /// List all notes
-    List {
-        /// Filter by tag
-        #[arg(short, long)]
-        tag: Option<String>,
-
-        /// Show only recent N notes
-        #[arg(short, long)]
-        recent: Option<usize>,
-    },
-
-    /// View a specific note
-    View { id: i32 },
-
-    /// Delete a note
-    Delete {
-        id: i32,
-
-        /// Skip confirmation
-        #[arg(short, long)]
-        force: bool,
-    },
-
-    /// Search notes by content or title
-    Search { query: String },
-
-    /// Edit an existing note
-    Edit {
-        id: i32,
-
-        #[arg(short, long)]
-        title: Option<String>,
-
-        #[arg(short, long)]
-        content: Option<String>,
-    },
-}
-
+// ── We define the shape of a note as it lives in our database ──
 #[derive(Debug)]
 struct Note {
-    id: i32,
+    id: i64,
     title: String,
     content: String,
-    tags: String,
     created_at: String,
     updated_at: String,
 }
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let db_path = get_db_path()?;
-    let conn = Connection::open(db_path)?;
-    initialize_database(&conn)?;
-
-    match cli.command {
-        Commands::Add { title, content, tags } => add_note(&conn, title, content, tags)?,
-        Commands::List { tag, recent } => list_notes(&conn, tag, recent)?,
-        Commands::View { id } => view_note(&conn, id)?,
-        Commands::Delete { id, force } => delete_note(&conn, id, force)?,
-        Commands::Search { query } => search_notes(&conn, &query)?,
-        Commands::Edit { id, title, content } => edit_note(&conn, id, title, content)?,
-    }
-
-    Ok(())
+// ── We use clap's derive macro to give us a beautiful CLI for free ──
+#[derive(Parser)]
+#[command(
+    name = "notebook",
+    about = "📓 Our orange-powered terminal notebook",
+    version = "0.1.0",
+    long_about = None,
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
 }
 
-fn get_db_path() -> Result<String> {
-    let home = std::env::var("HOME").context("Could not find home directory")?;
-    let notebook_dir = PathBuf::from(&home).join(".notebook");
+// We enumerate every action our notebook understands.
+#[derive(Subcommand)]
+enum Command {
+    /// We add a brand-new note
+    Add {
+        /// The title we give the note
+        title: String,
+        /// The body content of our note
+        content: String,
+    },
 
-    if !notebook_dir.exists() {
-        std::fs::create_dir_all(&notebook_dir)?;
-    }
+    /// We list every note we have stored
+    List,
 
-    Ok(notebook_dir
-        .join("notes.db")
-        .to_str()
-        .context("Invalid database path")?
-        .to_string())
+    /// We display a single note in full
+    View {
+        /// The ID of the note we want to see
+        id: i64,
+    },
+
+    /// We update an existing note's content (and optionally its title)
+    Edit {
+        /// The ID of the note we want to change
+        id: i64,
+        /// The new content body we are writing
+        content: String,
+        /// An optional new title — we keep the old one if omitted
+        #[arg(short, long)]
+        title: Option<String>,
+    },
+
+    /// We permanently delete a note — no undo!
+    Delete {
+        /// The ID of the note we wish to remove
+        id: i64,
+    },
+
+    /// We search through all our notes for a keyword
+    Search {
+        /// The search term we are hunting for
+        query: String,
+    },
 }
 
-fn initialize_database(conn: &Connection) -> Result<()> {
-    conn.execute(
+// ── We resolve where our database file lives on disk ──
+// We follow the XDG convention: ~/.local/share/notebook/notes.db
+fn db_path() -> Result<PathBuf> {
+    // We prefer the user's data directory; we fall back to home.
+    let base = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+
+    let dir = base.join(".local").join("share").join("notebook");
+
+    // We create the directory if it doesn't exist yet.
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("We couldn't create our data directory: {dir:?}"))?;
+
+    Ok(dir.join("notes.db"))
+}
+
+// ── We open (or create) our SQLite connection ──
+fn open_db() -> Result<Connection> {
+    let path = db_path()?;
+    let conn = Connection::open(&path)
+        .with_context(|| format!("We couldn't open our database at {path:?}"))?;
+
+    // We enable WAL mode so our writes don't block reads.
+    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+
+    Ok(conn)
+}
+
+// ── We run our initial migration the first time we start up ──
+fn init_schema(conn: &Connection) -> Result<()> {
+    // We create the notes table only if it isn't there yet —
+    // this keeps us safe to call on every single startup.
+    conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS notes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            content TEXT NOT NULL,
-            tags TEXT DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )",
-        [],
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            title      TEXT    NOT NULL,
+            content    TEXT    NOT NULL,
+            created_at TEXT    NOT NULL,
+            updated_at TEXT    NOT NULL
+        );",
     )?;
-
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_tags ON notes(tags)", [])?;
-
     Ok(())
 }
 
-fn add_note(conn: &Connection, title: String, content: String, tags: Option<String>) -> Result<()> {
-    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let tags_str = tags.unwrap_or_default();
+// ── We produce a timestamp string in our preferred format ──
+fn now() -> String {
+    Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
 
+// ── We print our fancy orange banner at the top of list/search output ──
+fn print_banner(label: &str) {
+    println!("\n{ORANGE_BOLD}╔══════════════════════════════════════╗{RESET}");
+    println!("{ORANGE_BOLD}║  📓  {WHITE_BOLD}{label:<32}{ORANGE_BOLD}║{RESET}");
+    println!("{ORANGE_BOLD}╚══════════════════════════════════════╝{RESET}\n");
+}
+
+// ── We draw a horizontal rule to separate notes visually ──
+fn divider() {
+    println!("{AMBER}──────────────────────────────────────────{RESET}");
+}
+
+// ────────────────────────────────────────────────────────────
+// We implement each subcommand below.
+// ────────────────────────────────────────────────────────────
+
+// We add a note and echo back its freshly assigned ID.
+fn cmd_add(conn: &Connection, title: &str, content: &str) -> Result<()> {
+    let ts = now();
     conn.execute(
-        "INSERT INTO notes (title, content, tags, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![title, content, tags_str, now, now],
+        "INSERT INTO notes (title, content, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![title, content, ts, ts],
     )?;
 
-    let last_id = conn.last_insert_rowid();
-    println!("✓ Note added successfully! (ID: {})", last_id);
+    let id = conn.last_insert_rowid();
+
+    println!("\n{GREEN}✔  Note saved!{RESET}  {DIM}id = {ORANGE_BOLD}{id}{RESET}\n");
+    Ok(())
+}
+
+// We fetch every note and render a compact summary table.
+fn cmd_list(conn: &Connection) -> Result<()> {
+    let mut stmt =
+        conn.prepare("SELECT id, title, created_at, updated_at FROM notes ORDER BY id ASC")?;
+
+    // We collect the rows first so we can report "nothing here yet".
+    let rows: Vec<(i64, String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    if rows.is_empty() {
+        println!(
+            "\n{AMBER}  We don't have any notes yet. Try:{RESET}\n\
+             {DIM}    notebook add \"My Title\" \"My content\"{RESET}\n"
+        );
+        return Ok(());
+    }
+
+    print_banner("Our Notes");
+
+    for (id, title, created, updated) in &rows {
+        println!("  {ORANGE_BOLD}[{id:>4}]{RESET}  {WHITE_BOLD}{title}{RESET}");
+        println!("         {DIM}created {created}  ·  updated {updated}{RESET}");
+        println!();
+    }
+
+    println!(
+        "{DIM}  We have {}{}{DIM} note(s) in our notebook.{RESET}\n",
+        ORANGE_BOLD,
+        rows.len(),
+    );
 
     Ok(())
 }
 
-fn list_notes(conn: &Connection, tag: Option<String>, recent: Option<usize>) -> Result<()> {
-    let mut query = String::from("SELECT id, title, tags, created_at FROM notes");
-    let mut params: Vec<String> = Vec::new();
+// We look up a single note by ID and display it in full.
+fn cmd_view(conn: &Connection, id: i64) -> Result<()> {
+    let result = conn.query_row(
+        "SELECT id, title, content, created_at, updated_at FROM notes WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(Note {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                content: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        },
+    );
 
-    if let Some(ref tag_filter) = tag {
-        query.push_str(" WHERE tags LIKE ?1");
-        params.push(format!("%{}%", tag_filter));
-    }
-
-    query.push_str(" ORDER BY created_at DESC");
-
-    if let Some(limit) = recent {
-        query.push_str(" LIMIT ?");
-        params.push(limit.to_string());
-    }
-
-    let mut stmt = conn.prepare(&query)?;
-
-    let param_refs: Vec<&dyn rusqlite::ToSql> = params
-        .iter()
-        .map(|p| p as &dyn rusqlite::ToSql)
-        .collect();
-
-    let note_iter = stmt.query_map(&*param_refs, |row| {
-        Ok(Note {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            content: String::new(), // not used in list view
-            tags: row.get(2)?,
-            created_at: row.get(3)?,
-            updated_at: String::new(), // not used in list view
-        })
-    })?;
-
-    let notes: Vec<Note> = note_iter.filter_map(Result::ok).collect();
-
-    if notes.is_empty() {
-        println!("× No notes found.");
-        if tag.is_some() {
-            println!("! Try removing the tag filter.");
-        }
-    } else {
-        println!("✓ Your Notes ({} total):\n", notes.len());
-        for note in notes {
-            println!("[{:3}] {}", note.id, note.title);
-            if !note.tags.is_empty() {
-                println!("      Tags: {}", note.tags);
-            }
-            println!("      Created: {}\n", note.created_at);
-        }
-    }
-
-    Ok(())
-}
-
-fn view_note(conn: &Connection, id: i32) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title, content, tags, created_at, updated_at FROM notes WHERE id = ?1",
-    )?;
-
-    let note = stmt.query_row(params![id], |row| {
-        Ok(Note {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            content: row.get(2)?,
-            tags: row.get(3)?,
-            created_at: row.get(4)?,
-            updated_at: row.get(5)?,
-        })
-    });
-
-    match note {
+    match result {
         Ok(note) => {
-            println!("\n Note #{}\n", note.id);
-            println!("Title: {}", note.title);
-            println!("Created: {}", note.created_at);
-            println!("Updated: {}", note.updated_at);
-            if !note.tags.is_empty() {
-                println!("Tags: {}", note.tags);
-            }
-            println!("\n---\n{}\n", note.content);
+            println!();
+            divider();
+            println!("{ORANGE_BOLD}  #{} — {}{RESET}", note.id, note.title);
+            divider();
+            println!("{WHITE_BOLD}\n{}{RESET}", note.content);
+            println!();
+            println!("{DIM}  Created : {}{RESET}", note.created_at);
+            println!("{DIM}  Updated : {}{RESET}", note.updated_at);
+            divider();
+            println!();
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => {
-            println!("× Note with ID {} not found.", id);
+            // We inform the user calmly — there's no note with that ID.
+            eprintln!("\n{RED}  ✘  We couldn't find a note with id = {id}.{RESET}\n");
         }
         Err(e) => return Err(e.into()),
     }
@@ -231,129 +246,137 @@ fn view_note(conn: &Connection, id: i32) -> Result<()> {
     Ok(())
 }
 
-fn delete_note(conn: &Connection, id: i32, force: bool) -> Result<()> {
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)",
+// We overwrite the content (and optionally the title) of an existing note.
+fn cmd_edit(conn: &Connection, id: i64, new_content: &str, new_title: Option<&str>) -> Result<()> {
+    let ts = now();
+
+    // We check whether the note actually exists before we try to update it.
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM notes WHERE id = ?1",
         params![id],
         |row| row.get(0),
     )?;
 
-    if !exists {
-        println!("× Note with ID {} not found.", id);
+    if count == 0 {
+        eprintln!("\n{RED}  ✘  We couldn't find a note with id = {id}.{RESET}\n");
         return Ok(());
     }
 
-    if !force {
-        println!("? Are you sure you want to delete note #{}? [y/N]", id);
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Delete cancelled.");
-            return Ok(());
-        }
+    if let Some(title) = new_title {
+        // We update both the title and the content in one shot.
+        conn.execute(
+            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3 WHERE id = ?4",
+            params![title, new_content, ts, id],
+        )?;
+    } else {
+        // We leave the title untouched and only update the content.
+        conn.execute(
+            "UPDATE notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
+            params![new_content, ts, id],
+        )?;
     }
 
+    println!("\n{GREEN}✔  Note {ORANGE_BOLD}{id}{GREEN} updated successfully.{RESET}\n");
+
+    Ok(())
+}
+
+// We delete a note — we keep it simple and permanent.
+fn cmd_delete(conn: &Connection, id: i64) -> Result<()> {
     let affected = conn.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
 
-    if affected > 0 {
-        println!("✓ Note #{} deleted successfully.", id);
+    if affected == 0 {
+        // We let the user know we couldn't find anything to delete.
+        eprintln!("\n{RED}  ✘  We couldn't find a note with id = {id}.{RESET}\n");
+    } else {
+        println!("\n{GREEN}✔  Note {ORANGE_BOLD}{id}{GREEN} deleted.{RESET}\n");
     }
 
     Ok(())
 }
 
-fn search_notes(conn: &Connection, query: &str) -> Result<()> {
-    let search_pattern = format!("%{}%", query);
+// We search titles and content with SQLite's LIKE operator.
+fn cmd_search(conn: &Connection, query: &str) -> Result<()> {
+    // We wrap the query in wildcards so partial matches work too.
+    let pattern = format!("%{query}%");
 
     let mut stmt = conn.prepare(
-        "SELECT id, title, content, tags, created_at 
-         FROM notes 
-         WHERE title LIKE ?1 OR content LIKE ?2 OR tags LIKE ?3
-         ORDER BY created_at DESC",
+        "SELECT id, title, content, created_at, updated_at
+         FROM   notes
+         WHERE  title   LIKE ?1
+            OR  content LIKE ?1
+         ORDER BY id ASC",
     )?;
 
-    let note_iter = stmt.query_map(
-        params![search_pattern, search_pattern, search_pattern],
-        |row| {
+    let rows: Vec<Note> = stmt
+        .query_map(params![pattern], |row| {
             Ok(Note {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 content: row.get(2)?,
-                tags: row.get(3)?,
-                created_at: row.get(4)?,
-                updated_at: String::new(),
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
             })
-        },
-    )?;
+        })?
+        .collect::<rusqlite::Result<_>>()?;
 
-    let notes: Vec<Note> = note_iter.filter_map(Result::ok).collect();
-
-    if notes.is_empty() {
-        println!("× No notes found matching '{}'", query);
-    } else {
-        println!("✓ Found {} note(s) matching '{}':\n", notes.len(), query);
-        for note in notes {
-            println!("[{:3}] {}", note.id, note.title);
-            let preview = if note.content.len() > 60 {
-                format!("{}...",
-                    note.content[..60].to_string())
-            } else {
-                note.content
-            };
-            println!("      Preview: {}", preview);
-            if !note.tags.is_empty() {
-                println!("      Tags: {}", note.tags);
-            }
-            println!();
-        }
+    if rows.is_empty() {
+        println!("\n{AMBER}  We found no notes matching {query}.{RESET}\n");
+        return Ok(());
     }
+
+    print_banner(&format!("Results for \"{query}\""));
+
+    for note in &rows {
+        println!(
+            "  {ORANGE_BOLD}[{:>4}]{RESET}  {WHITE_BOLD}{}{RESET}",
+            note.id, note.title
+        );
+
+        // We show a snippet of the content so the user knows why it matched.
+        let snippet: String = note.content.chars().take(80).collect();
+        let ellipsis = if note.content.len() > 80 { "…" } else { "" };
+        println!("         {DIM}{snippet}{ellipsis}{RESET}");
+        println!();
+    }
+
+    println!(
+        "{DIM}  We matched {}{}{DIM} note(s).{RESET}\n",
+        ORANGE_BOLD,
+        rows.len(),
+    );
 
     Ok(())
 }
 
-fn edit_note(
-    conn: &Connection,
-    id: i32,
-    new_title: Option<String>,
-    new_content: Option<String>,
-) -> Result<()> {
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)",
-        params![id],
-        |row| row.get(0),
-    )?;
+// ── Our entry point — we tie everything together here ──
+fn main() -> Result<()> {
+    // We parse the arguments first so clap can print --help on bad input.
+    let cli = Cli::parse();
 
-    if !exists {
-        println!("× Note with ID {} not found.", id);
-        return Ok(());
-    }
+    // We open our database and ensure our schema is ready.
+    let conn = open_db()?;
+    init_schema(&conn)?;
 
-    let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-
-    match (new_title, new_content) {
-        (Some(title), Some(content)) => {
-            conn.execute(
-                "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3 WHERE id = ?4",
-                params![title, content, now, id],
-            )?;
-            println!("✓ Note #{} updated completely.", id);
+    // We dispatch to whichever subcommand the user requested.
+    match &cli.command {
+        Command::Add { title, content } => {
+            cmd_add(&conn, title, content)?;
         }
-        (Some(title), None) => {
-            conn.execute(
-                "UPDATE notes SET title = ?1, updated_at = ?2 WHERE id = ?3",
-                params![title, now, id],
-            )?;
-            println!("✓ Note #{} title updated.", id);
+        Command::List => {
+            cmd_list(&conn)?;
         }
-        (None, Some(content)) => {
-            conn.execute(
-                "UPDATE notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
-                params![content, now, id],
-            )?;
-            println!("✓ Note #{} content updated.", id);
+        Command::View { id } => {
+            cmd_view(&conn, *id)?;
         }
-        (None, None) => {
-            println!("No changes provided. Use --title or --content to update.");
+        Command::Edit { id, content, title } => {
+            cmd_edit(&conn, *id, content, title.as_deref())?;
+        }
+        Command::Delete { id } => {
+            cmd_delete(&conn, *id)?;
+        }
+        Command::Search { query } => {
+            cmd_search(&conn, query)?;
         }
     }
 
